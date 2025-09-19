@@ -1,13 +1,16 @@
 #![feature(duration_constructors_lite)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration};
-use rocket::{get, launch, routes, tokio};
+use rocket::{routes, tokio};
 use rocket::tokio::sync::RwLock;
 use rocket::tokio::time::Instant;
 use crate::lieferengpaesse::Lieferengpass;
+use crate::rote_hand_briefe::{crawl_bfarm, crawl_pei, Brief};
 
 pub mod lieferengpaesse;
+pub mod rote_hand_briefe;
 
 #[derive(Default)]
 pub struct TempStorage{
@@ -17,6 +20,7 @@ pub struct TempStorage{
 #[derive(Default)]
 pub struct InnerStorage{
     pub lieferengpaesse: Vec<Lieferengpass>,
+    pub briefe: HashMap<String, Brief>,
     pub reqwest_client: reqwest::Client,
 }
 
@@ -27,10 +31,28 @@ pub async fn refresh_worker(storage: Arc<TempStorage>){
         loop{
             last_refresh = Instant::now();
 
-            // Refresh lieferengpässe
-            lieferengpaesse::refresh_lieferengpaesse(storage.clone()).await;
+            println!("Starting refresh!");
 
-            tokio::time::sleep_until(last_refresh + Duration::from_mins(2)).await;
+            println!("Refreshing pei letters...");
+            if let Err(e) = crawl_pei(storage.clone()).await{
+                eprintln!("Failed to crawl pei: {}", e);                
+            }
+            
+            println!("Refreshing bfarm letters...");
+            if let Err(e) = crawl_bfarm(storage.clone()).await{
+                eprintln!("Failed to crawl bfarm: {}", e);
+            }
+            
+            println!("Refreshing lieferengpässe...");
+            // Refresh lieferengpässe
+            if let Err(e) = lieferengpaesse::refresh_lieferengpaesse(storage.clone()).await{
+                eprintln!("Reqwest Error: {:?}. Trying again in 5 seconds.", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            };
+
+            println!("Refresh finished. We have {} Lieferengpässe and {} letters listed. Waiting for next refresh interval.", storage.storage.read().await.lieferengpaesse.len(), storage.storage.read().await.briefe.len());
+            tokio::time::sleep_until(last_refresh + Duration::from_mins(15)).await;
         }
     });
 }
@@ -43,7 +65,7 @@ async fn main() -> Result<(), rocket::Error> {
     refresh_worker(storage.clone()).await;
 
     let _rocket = rocket::build()
-        .mount("/lieferengpaesse", routes![lieferengpaesse::lieferengpaesse])
+        .mount("/api", routes![lieferengpaesse::lieferengpaesse])
         .manage(storage)
         .launch()
         .await?;
