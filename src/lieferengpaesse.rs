@@ -1,18 +1,9 @@
-use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::sync::Arc;
 use chrono::NaiveDate;
-use rocket::{get, State};
 use rocket::serde::Deserialize;
-use rocket::serde::json::Json;
 use serde::Serialize;
 use crate::TempStorage;
-
-#[get("/lieferengpaesse")]
-pub async fn lieferengpaesse(storage: &State<Arc<TempStorage>>) -> Json<Vec<Lieferengpass>> {
-    Json(storage.storage.read().await.lieferengpaesse.clone())
-}
-
 
 pub async fn refresh_lieferengpaesse(storage: Arc<TempStorage>) -> Result<(), reqwest::Error>{
     let client = storage.storage.read().await.reqwest_client.clone();

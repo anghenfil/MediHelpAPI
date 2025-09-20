@@ -2,10 +2,11 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use regex::Regex;
 use rocket::form::validate::Contains;
+use rocket::serde::Serialize;
 use crate::TempStorage;
 use scraper::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Brief{
     pub letter_type: LetterType,
     pub source: LetterSource,
@@ -18,13 +19,13 @@ pub struct Brief{
     pub long_description: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub enum LetterType{
     RoteHandBrief,
     Informationsbrief
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub enum LetterSource{
     BfArM,
     PEI
@@ -274,7 +275,7 @@ async fn pei_crawl_detailed_entry(client: reqwest::Client, url: &str) -> Result<
                     Node::Text(txt) => {
                         description += txt;
                     }
-                    Node::Element(element) => {
+                    Node::Element(_) => {
                         let el_ref = ElementRef::wrap(child).unwrap();
                         description += &el_ref.text().collect::<String>();
                     },
@@ -293,7 +294,7 @@ async fn pei_crawl_detailed_entry(client: reqwest::Client, url: &str) -> Result<
 
     let pdf_link = match download_a_tag.value().attr("href"){
         None => return Ok(None),
-        Some(href) => format!("https://www.pei.de/{}", href),
+        Some(href) => format!("https://www.pei.de{}", href),
     };
 
     let download_link_text = download_a_tag.text().collect::<String>();

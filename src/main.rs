@@ -11,6 +11,7 @@ use crate::rote_hand_briefe::{crawl_bfarm, crawl_pei, Brief};
 
 pub mod lieferengpaesse;
 pub mod rote_hand_briefe;
+mod api;
 
 #[derive(Default)]
 pub struct TempStorage{
@@ -65,7 +66,7 @@ async fn main() -> Result<(), rocket::Error> {
     refresh_worker(storage.clone()).await;
 
     let _rocket = rocket::build()
-        .mount("/api", routes![lieferengpaesse::lieferengpaesse])
+        .mount("/api", routes![api::lieferengpaesse, api::briefe])
         .manage(storage)
         .launch()
         .await?;
