@@ -14,22 +14,21 @@ pub enum ApiResponse<T>{
 
 #[get("/lieferengpaesse")]
 pub async fn lieferengpaesse(storage: &State<Arc<TempStorage>>) -> Json<ApiResponse<Vec<Lieferengpass>>> {
+    if !storage.storage.read().await.lieferengpaesse_loaded_initially{
+        return Json(ApiResponse::NotReady)
+    }
     let data = storage.storage.read().await.lieferengpaesse.clone();
 
-    if data.is_empty(){
-        Json(ApiResponse::NotReady)
-    }else{
-        Json(ApiResponse::Success(data))
-    }
+    Json(ApiResponse::Success(data))
 }
 
 #[get("/briefe")]
 pub async fn briefe(storage: &State<Arc<TempStorage>>) -> Json<ApiResponse<Vec<Brief>>> {
-    let data = storage.storage.read().await.briefe.clone().into_values().collect::<Vec<Brief>>();
-
-    if data.is_empty(){
-        Json(ApiResponse::NotReady)
-    }else{
-        Json(ApiResponse::Success(data))
+    if !storage.storage.read().await.briefe_loaded_initially{
+        return Json(ApiResponse::NotReady)
     }
+    
+    let data = storage.storage.read().await.briefe.clone().into_values().collect::<Vec<Brief>>();
+    
+    Json(ApiResponse::Success(data))
 }

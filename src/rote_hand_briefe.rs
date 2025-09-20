@@ -1,10 +1,15 @@
 use std::sync::Arc;
 use chrono::NaiveDate;
 use regex::Regex;
+use reqwest::Error;
 use rocket::form::validate::Contains;
+use rocket::futures::future::{join_all, try_join_all};
 use rocket::serde::Serialize;
+use rocket::tokio::join;
 use crate::TempStorage;
 use scraper::*;
+
+const MAX_CONCURRENT_REQUESTS: u8 = 5;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Brief{
@@ -30,12 +35,11 @@ pub enum LetterSource{
     BfArM,
     PEI
 }
-
 pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error> {
     let client = storage.storage.read().await.reqwest_client.clone();
 
     let mut page = 1;
-    let mut briefe : Vec<Brief> = Vec::new();
+    let mut briefe: Vec<Brief> = Vec::new();
 
     loop {
         let mut any_entry_added = false;
@@ -46,13 +50,13 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
         let fragment = Html::parse_fragment(&response.text().await?);
 
         let table_selector = Selector::parse("table").unwrap();
-        let table = match fragment.select(&table_selector).next(){
+        let table = match fragment.select(&table_selector).next() {
             Some(table) => table,
             None => break,
         };
 
         let rows_selector = Selector::parse("tr").unwrap();
-        let rows : Vec<ElementRef>= table.select(&rows_selector).collect();
+        let rows: Vec<ElementRef> = table.select(&rows_selector).collect();
 
         if rows.is_empty() { break; }
 
@@ -61,17 +65,17 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
         let teasertext_selector = Selector::parse("p.teasertext-wrapper").unwrap();
 
         for row in &rows {
-            let tds : Vec<ElementRef>= row.select(&td_selector).collect();
+            let tds: Vec<ElementRef> = row.select(&td_selector).collect();
 
-            if tds.len() != 2{
+            if tds.len() != 2 {
                 eprintln!("Expected tr to have two columns. Skipping.");
                 continue;
             }
 
             let mut iter = tds.iter();
 
-            let date = iter.next().unwrap().text().collect::<String >().trim().to_string();
-            let date = match NaiveDate::parse_from_str(date.as_str(), "%d.%m.%Y"){
+            let date = iter.next().unwrap().text().collect::<String>().trim().to_string();
+            let date = match NaiveDate::parse_from_str(date.as_str(), "%d.%m.%Y") {
                 Ok(date) => date,
                 Err(e) => {
                     eprintln!("Couldn't parse letter date: {}", e);
@@ -81,21 +85,35 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
 
             let datacol = iter.next().unwrap();
 
-            let link = match datacol.select(&a_selector).next(){
+            let link = match datacol.select(&a_selector).next() {
                 Some(link) => link,
                 None => {
                     eprintln!("Expected a link in the data row :( Skipping.");
                     continue;
-                },
+                }
             };
 
-            let link_to_letter = link.value().attr("href").unwrap();
-            let link_to_letter = format!("https://www.bfarm.de/{}", link_to_letter.split(".html").next().unwrap());
+            let link_to_letter = match link.value().attr("href") {
+                Some(href) => href,
+                None => {
+                    eprintln!("Link has no href attribute. Skipping.");
+                    continue;
+                }
+            };
+
+            let base_url = match link_to_letter.split(".html").next() {
+                Some(url) => url,
+                None => {
+                    eprintln!("Could not split link URL. Skipping.");
+                    continue;
+                }
+            };
+            let link_to_letter = format!("https://www.bfarm.de/{}", base_url);
 
             let link_to_pdf = format!("{}?__blob=publicationFile", link_to_letter);
             let title = link.inner_html();
 
-            let p_tag = match datacol.select(&teasertext_selector).next(){
+            let p_tag = match datacol.select(&teasertext_selector).next() {
                 Some(p_tag) => p_tag,
                 None => {
                     eprintln!("Expected a p tag in the data row :( Skipping.");
@@ -104,48 +122,58 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
             };
 
             let mut short_description = String::new();
-            let mut wirkstoffe : Vec<String> = Vec::new();
+            let mut wirkstoffe: Vec<String> = Vec::new();
 
-            for child in p_tag.children(){
-                match child.value(){
+            for child in p_tag.children() {
+                match child.value() {
                     Node::Text(txt) => {
                         short_description += txt;
                     }
                     Node::Element(element) => {
                         if element.name.local.as_ref() == "span" {
-                            if element.classes().find(|ele|ele.eq(&"wirkstoff-wrapper")).is_some(){ // Found wirkstoff wrapper
-                                let el_ref = ElementRef::wrap(child).unwrap();
+                            if element.classes().find(|ele| ele.eq(&"wirkstoff-wrapper")).is_some() { // Found wirkstoff wrapper
+                                let el_ref = match ElementRef::wrap(child) {
+                                    Some(el) => el,
+                                    None => {
+                                        eprintln!("Could not wrap element ref. Skipping wirkstoff.");
+                                        continue;
+                                    }
+                                };
                                 let mut span_text = el_ref.text().collect::<String>();
-                                span_text = match span_text.split("Wirkstoff:").last(){
+                                span_text = match span_text.split("Wirkstoff:").last() {
                                     None => {
                                         eprintln!("No Wirkstoff found in span.");
                                         continue;
                                     }
                                     Some(wirkstoff) => wirkstoff.to_string(),
                                 };
-                                wirkstoffe = span_text.split(|c| c == ',' || c == '/').map(|ele|ele.trim().to_string()).collect();
+                                wirkstoffe = span_text.split(|c| c == ',' || c == '/').map(|ele| ele.trim().to_string()).collect();
                             }
-                        }else {
-                            let el_ref = ElementRef::wrap(child).unwrap();
+                        } else {
+                            let el_ref = match ElementRef::wrap(child) {
+                                Some(el) => el,
+                                None => {
+                                    eprintln!("Could not wrap element ref. Skipping description part.");
+                                    continue;
+                                }
+                            };
                             short_description += &el_ref.text().collect::<String>();
                         }
-                    },
-                    _ => {
-
                     }
+                    _ => {}
                 }
             }
 
             let short_description = short_description.trim().to_string();
 
             let temp = title.to_lowercase();
-            let letter_type = if temp.contains("rote-hand-brief") || temp.contains("rote hand brief")|| temp.contains("rote-hand brief"){
+            let letter_type = if temp.contains("rote-hand-brief") || temp.contains("rote hand brief") || temp.contains("rote-hand brief") {
                 LetterType::RoteHandBrief
-            }else{
+            } else {
                 LetterType::Informationsbrief
             };
-            
-            let brief = Brief{
+
+            let brief = Brief {
                 letter_type,
                 source: LetterSource::BfArM,
                 date,
@@ -163,19 +191,41 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
         if !any_entry_added {
             break;
         }
-        
-        page = page+1;
+
+        page = page + 1;
     }
 
-    for mut brief in briefe.into_iter() {
-        if storage.storage.read().await.briefe.contains_key(&brief.link_to_html){
-            println!("Skipping letter, already in database.");
-            continue;
-        }
+    let mut briefe_to_crawl = Vec::<Brief>::new();
 
-        brief.long_description = bfarm_crawl_detailed_entry(client.clone(), &brief.link_to_html).await?;
-        println!("Added new letter from BfArM ({})", &brief.title);
-        storage.storage.write().await.briefe.insert(brief.link_to_html.clone(), brief);
+    for brief in briefe {
+        if !storage.storage.read().await.briefe.contains_key(&brief.link_to_html) {
+            briefe_to_crawl.push(brief);
+        }
+    }
+
+    let mut briefe_res: Vec<Brief> = Vec::new();
+    
+    println!("Crawling description for {} BfArM letters", briefe_to_crawl.len());
+
+    while !briefe_to_crawl.is_empty() {
+        let chunk_size = briefe_to_crawl.len().min(MAX_CONCURRENT_REQUESTS as usize);
+        let mut next_briefe: Vec<Brief> = if briefe_to_crawl.len() >= MAX_CONCURRENT_REQUESTS as usize {
+            briefe_to_crawl.drain(..chunk_size).collect()
+        }else{
+            briefe_to_crawl.drain(..).collect()
+        };
+
+        let futures = next_briefe.iter_mut().map(|brief| bfarm_crawl_detailed_entry(brief, client.clone())).collect::<Vec<_>>();
+        join_all(futures).await;
+
+        briefe_res.append(&mut next_briefe);
+        println!("Crawled next chunk, now {} briefe are finished.", briefe_res.len());
+    }
+
+    // Add to storage
+    let mut handle = storage.storage.write().await;
+    for brief in briefe_res {
+        handle.briefe.insert(brief.link_to_html.clone(), brief);
     }
 
     println!("Finished crawl!");
@@ -183,16 +233,19 @@ pub async fn crawl_bfarm(storage: Arc<TempStorage>) -> Result<(), reqwest::Error
     Ok(())
 }
 
-async fn bfarm_crawl_detailed_entry(client: reqwest::Client, url: &str) -> Result<Option<String>, reqwest::Error> {
-    let request = client.get(url).build()?;
+async fn bfarm_crawl_detailed_entry(brief: &mut Brief, client: reqwest::Client) -> Result<(), reqwest::Error> {
+    let request = client.get(&brief.link_to_html).build()?;
     let response = client.execute(request).await?;
 
     let fragment = Html::parse_fragment(&response.text().await?);
 
     let description_p_tag_selector = Selector::parse(".content > p").unwrap();
     match fragment.select(&description_p_tag_selector).next(){
-        None => Ok(None),
-        Some(p) => Ok(Some(p.text().collect::<String>().trim().to_string())),
+        None => Ok(()),
+        Some(p) => {
+            brief.long_description = Some(p.text().collect::<String>().trim().to_string());
+            Ok(())
+        },
     }
 }
 
@@ -227,20 +280,42 @@ pub async fn crawl_pei(storage: Arc<TempStorage>) -> Result<(), reqwest::Error>{
     }
 
     println!("Found {} PEI letters. Crawling details...", brief_links.len());
-
-    let mut letters = Vec::new();
+        
+    let mut letter_to_crawl = Vec::new();
     for brief_link in brief_links {
         if !storage.storage.read().await.briefe.contains_key(&brief_link){
-            if let Some(letter) = pei_crawl_detailed_entry(client.clone(), &brief_link).await? {
-                letters.push(letter);
-            }else{
-                println!("Failed to crawl pei letter: {}", brief_link);
-            }
+            letter_to_crawl.push(brief_link);
         }
     }
-    for letter in letters {
-        println!("Added letter: {:?}", letter);
-        storage.storage.write().await.briefe.insert(letter.link_to_html.clone(), letter);
+    
+    let mut future_res = Vec::new();
+    
+    while !letter_to_crawl.is_empty() {
+        println!("Processing next chunk of PEI letters to crawl.");
+        let chunk_size = letter_to_crawl.len().min(MAX_CONCURRENT_REQUESTS as usize);
+        let mut next_links: Vec<String> = if letter_to_crawl.len() >= MAX_CONCURRENT_REQUESTS as usize {
+            letter_to_crawl.drain(..chunk_size).collect()
+        }else{
+            letter_to_crawl.drain(..).collect()
+        };
+
+        let futures = next_links.iter_mut().map(|link| pei_crawl_detailed_entry(client.clone(), link)).collect::<Vec<_>>();
+        future_res.append(&mut join_all(futures).await);
+        println!("Processecd chunks. Processed {} entries already.", future_res.len());
+    }
+    
+    let mut handle = storage.storage.write().await;
+    for future_result in future_res {
+        match future_result {
+            Ok(val) => {
+                if let Some(val) = val{
+                    handle.briefe.insert(val.link_to_html.clone(), val);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to crawl pei letter: {}", e);
+            }
+        }
     }
 
     println!("Finished crawl for PEI");

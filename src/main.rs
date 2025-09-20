@@ -20,6 +20,8 @@ pub struct TempStorage{
 
 #[derive(Default)]
 pub struct InnerStorage{
+    pub briefe_loaded_initially: bool,
+    pub lieferengpaesse_loaded_initially: bool,
     pub lieferengpaesse: Vec<Lieferengpass>,
     pub briefe: HashMap<String, Brief>,
     pub reqwest_client: reqwest::Client,
@@ -44,6 +46,10 @@ pub async fn refresh_worker(storage: Arc<TempStorage>){
                 eprintln!("Failed to crawl bfarm: {}", e);
             }
             
+            if !storage.storage.read().await.briefe_loaded_initially{
+                storage.storage.write().await.briefe_loaded_initially = true;
+            }
+            
             println!("Refreshing lieferengpässe...");
             // Refresh lieferengpässe
             if let Err(e) = lieferengpaesse::refresh_lieferengpaesse(storage.clone()).await{
@@ -52,6 +58,10 @@ pub async fn refresh_worker(storage: Arc<TempStorage>){
                 continue;
             };
 
+            if !storage.storage.read().await.lieferengpaesse_loaded_initially{
+                storage.storage.write().await.lieferengpaesse_loaded_initially = true;
+            }
+            
             println!("Refresh finished. We have {} Lieferengpässe and {} letters listed. Waiting for next refresh interval.", storage.storage.read().await.lieferengpaesse.len(), storage.storage.read().await.briefe.len());
             tokio::time::sleep_until(last_refresh + Duration::from_mins(15)).await;
         }
